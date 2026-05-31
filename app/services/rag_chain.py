@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,8 +11,19 @@ from app.core.config import Settings
 from app.core.responses import ApiError
 from app.schemas.rag import ChatRequest, RagOptions, RetrieveRequest
 from app.services.dashscope import DashScopeReranker
-from app.services.repository import RagRepository
+from app.services.repository import RagRepository, normalize_mode
 from app.services.vector_store import VectorStore
+from app.services.web_fallback import TavilyWebFallbackService
+
+
+@dataclass
+class ChatPreparation:
+    conversation_id: str
+    knowledge_base_ids: list[str]
+    sources: list[dict[str, Any]]
+    effective_mode: str
+    used_web: bool
+    coverage_score: float
 
 
 class RagChainService:
@@ -21,11 +33,13 @@ class RagChainService:
         repository: RagRepository,
         vector_store: VectorStore,
         reranker: DashScopeReranker,
+        web_fallback: TavilyWebFallbackService,
     ):
         self.settings = settings
         self.repository = repository
         self.vector_store = vector_store
         self.reranker = reranker
+        self.web_fallback = web_fallback
 
     def retrieve(self, request: RetrieveRequest, principal: Principal) -> list[dict[str, Any]]:
         knowledge_base_ids = self._normalize_kb_ids(request.knowledgeBaseIds, principal)
@@ -47,14 +61,17 @@ class RagChainService:
         ]
 
     async def chat(self, request: ChatRequest, principal: Principal) -> dict[str, Any]:
-        conversation_id, sources = self._prepare_chat(request, principal)
-        answer = await self._generate_answer(request.query, sources, request.options)
-        usage = self._usage_placeholder(request.query, answer, sources)
-        self._save_chat(principal, conversation_id, request, answer, sources, usage)
+        prepared = await self._prepare_chat(request, principal)
+        answer = await self._generate_answer(request.query, prepared.sources, request.options)
+        usage = self._usage_placeholder(request.query, answer, prepared.sources)
+        self._save_chat(principal, prepared, request, answer, usage)
         return {
             "answer": answer,
-            "conversationId": conversation_id,
-            "sources": sources,
+            "conversationId": prepared.conversation_id,
+            "sources": prepared.sources,
+            "effectiveMode": prepared.effective_mode,
+            "usedWeb": prepared.used_web,
+            "coverageScore": prepared.coverage_score,
             "usage": usage,
         }
 
@@ -63,34 +80,57 @@ class RagChainService:
         answer_parts: list[str] = []
         sources: list[dict[str, Any]] = []
         try:
-            conversation_id, sources = self._prepare_chat(request, principal)
-            yield self._sse("retrieval", {"sources": sources})
+            prepared = await self._prepare_chat(request, principal)
+            conversation_id = prepared.conversation_id
+            sources = prepared.sources
+            yield self._sse(
+                "retrieval",
+                {
+                    "sources": sources,
+                    "effectiveMode": prepared.effective_mode,
+                    "usedWeb": prepared.used_web,
+                    "coverageScore": prepared.coverage_score,
+                },
+            )
             async for delta in self._stream_answer(request.query, sources, request.options):
                 answer_parts.append(delta)
                 yield self._sse("delta", {"content": delta})
             answer = "".join(answer_parts)
             usage = self._usage_placeholder(request.query, answer, sources)
-            self._save_chat(principal, conversation_id, request, answer, sources, usage)
-            yield self._sse("done", {"conversationId": conversation_id, "usage": usage})
+            self._save_chat(principal, prepared, request, answer, usage)
+            yield self._sse(
+                "done",
+                {
+                    "conversationId": conversation_id,
+                    "usage": usage,
+                    "effectiveMode": prepared.effective_mode,
+                    "usedWeb": prepared.used_web,
+                    "coverageScore": prepared.coverage_score,
+                },
+            )
         except ApiError as exc:
             yield self._sse("error", {"message": exc.message, "code": exc.code})
         except Exception as exc:
             yield self._sse("error", {"message": f"RAG 生成失败: {exc}", "code": 500})
 
-    def _prepare_chat(
+    async def _prepare_chat(
         self,
         request: ChatRequest,
         principal: Principal,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> ChatPreparation:
+        knowledge_base_ids = self._normalize_kb_ids(request.knowledgeBaseIds, principal)
+        knowledge_bases = [
+            self.repository.require_knowledge_base(kb_id, principal)
+            for kb_id in knowledge_base_ids
+        ]
         retrieve_request = RetrieveRequest(
             query=request.query,
-            knowledgeBaseIds=request.knowledgeBaseIds,
+            knowledgeBaseIds=knowledge_base_ids,
             topK=request.options.topK,
             enableRerank=request.options.enableRerank,
             rerankTopN=request.options.rerankTopN,
             scoreThreshold=request.options.scoreThreshold,
         )
-        knowledge_base_ids = self._normalize_kb_ids(request.knowledgeBaseIds, principal)
         conversation_id = self.repository.create_or_touch_conversation(
             principal,
             request.conversationId,
@@ -98,7 +138,29 @@ class RagChainService:
             request.query,
         )
         sources = self.retrieve(retrieve_request, principal)
-        return conversation_id, sources
+        coverage_score = self._coverage_score(sources)
+        effective_mode = self._effective_mode(request.mode, knowledge_bases)
+        allow_web_search = any(bool(item.get("allowWebSearch")) for item in knowledge_bases)
+        used_web = False
+
+        if (
+            effective_mode == "open"
+            and allow_web_search
+            and coverage_score < self.settings.coverage_threshold
+        ):
+            web_sources = await self.web_fallback.search(request.query, self.settings.web_max_results)
+            if web_sources:
+                sources = [*sources, *web_sources]
+                used_web = True
+
+        return ChatPreparation(
+            conversation_id=conversation_id,
+            knowledge_base_ids=knowledge_base_ids,
+            sources=sources,
+            effective_mode=effective_mode,
+            used_web=used_web,
+            coverage_score=coverage_score,
+        )
 
     def _normalize_kb_ids(self, knowledge_base_ids: list[str], principal: Principal) -> list[str]:
         normalized = [str(item) for item in knowledge_base_ids if str(item).strip()]
@@ -130,6 +192,17 @@ class RagChainService:
                 }
             )
         return results
+
+    def _coverage_score(self, sources: list[dict[str, Any]]) -> float:
+        if not sources:
+            return 0
+        return max(float(item.get("rerankScore") or item.get("score") or 0) for item in sources)
+
+    def _effective_mode(self, request_mode: str | None, knowledge_bases: list[dict[str, Any]]) -> str:
+        requested = normalize_mode(request_mode, "")
+        if requested:
+            return requested
+        return "open" if any(item.get("defaultMode") == "open" for item in knowledge_bases) else "strict"
 
     async def _generate_answer(
         self,
@@ -185,22 +258,23 @@ class RagChainService:
     def _save_chat(
         self,
         principal: Principal,
-        conversation_id: str,
+        prepared: ChatPreparation,
         request: ChatRequest,
         answer: str,
-        sources: list[dict[str, Any]],
         usage: dict[str, Any],
     ) -> None:
-        knowledge_base_ids = self._normalize_kb_ids(request.knowledgeBaseIds, principal)
-        self.repository.add_conversation_message(conversation_id, "user", request.query)
-        self.repository.add_conversation_message(conversation_id, "assistant", answer, sources, usage)
+        self.repository.add_conversation_message(prepared.conversation_id, "user", request.query)
+        self.repository.add_conversation_message(prepared.conversation_id, "assistant", answer, prepared.sources, usage)
         self.repository.save_qa_log(
             principal,
-            conversation_id,
-            knowledge_base_ids,
+            prepared.conversation_id,
+            prepared.knowledge_base_ids,
             request.query,
             answer,
-            sources,
+            prepared.sources,
+            used_web=prepared.used_web,
+            coverage_score=prepared.coverage_score,
+            mode=prepared.effective_mode,
         )
 
     def _usage_placeholder(

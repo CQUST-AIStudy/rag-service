@@ -30,6 +30,23 @@ def from_json(value: str | None, default: Any) -> Any:
         return default
 
 
+def to_bool_int(value: Any, default: bool = False) -> int:
+    if value is None:
+        return 1 if default else 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int | float):
+        return 1 if value else 0
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in {"1", "true", "yes", "y", "on", "open"} else 0
+    return 1 if default else 0
+
+
+def normalize_mode(value: Any, default: str = "strict") -> str:
+    mode = str(value or default).strip().lower()
+    return mode if mode in {"strict", "open"} else default
+
+
 class RagRepository:
     def __init__(self, db: Database):
         self.db = db
@@ -46,10 +63,11 @@ class RagRepository:
             conn.execute(
                 """
                 INSERT INTO knowledge_base (
-                  id, owner_id, owner_role, name, description, course_id,
+                  id, owner_id, owner_role, name, description, course_id, course_name, term,
                   embedding_model, embedding_dimensions, chunk_size, chunk_overlap,
-                  doc_visibility, class_ids_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  doc_visibility, class_ids_json, default_mode, allow_web_search, require_citation,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kb_id,
@@ -58,12 +76,20 @@ class RagRepository:
                     data["name"],
                     data.get("description") or "",
                     data.get("courseId") or data.get("course_id") or "",
+                    data.get("courseName") or data.get("course_name") or "",
+                    data.get("term") or "",
                     data.get("embeddingModel") or data.get("embedding_model"),
                     embedding_dimensions,
                     int(data.get("chunkSize") or data.get("chunk_size") or 512),
                     int(data.get("chunkOverlap") or data.get("chunk_overlap") or 64),
                     data.get("docVisibility") or data.get("doc_visibility") or "public",
                     to_json(data.get("classIds") or data.get("class_ids") or []),
+                    normalize_mode(data.get("defaultMode") or data.get("default_mode")),
+                    to_bool_int(data.get("allowWebSearch") or data.get("allow_web_search")),
+                    to_bool_int(
+                        data.get("requireCitation") if "requireCitation" in data else data.get("require_citation"),
+                        True,
+                    ),
                     ts,
                     ts,
                 ),
@@ -136,18 +162,30 @@ class RagRepository:
             conn.execute(
                 """
                 UPDATE knowledge_base
-                SET name = ?, description = ?, course_id = ?, chunk_size = ?, chunk_overlap = ?,
-                    doc_visibility = ?, class_ids_json = ?, updated_at = ?
+                SET name = ?, description = ?, course_id = ?, course_name = ?, term = ?,
+                    chunk_size = ?, chunk_overlap = ?, doc_visibility = ?, class_ids_json = ?,
+                    default_mode = ?, allow_web_search = ?, require_citation = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     data.get("name") or current["name"],
                     data.get("description") or "",
                     data.get("courseId") or data.get("course_id") or current.get("courseId") or "",
+                    data.get("courseName") or data.get("course_name") or current.get("courseName") or "",
+                    data.get("term") or current.get("term") or "",
                     int(data.get("chunkSize") or data.get("chunk_size") or current["chunkSize"]),
                     int(data.get("chunkOverlap") or data.get("chunk_overlap") or current["chunkOverlap"]),
                     data.get("docVisibility") or data.get("doc_visibility") or current["docVisibility"],
                     to_json(data.get("classIds") or data.get("class_ids") or current["boundClassIds"]),
+                    normalize_mode(data.get("defaultMode") or data.get("default_mode") or current["defaultMode"]),
+                    to_bool_int(
+                        data.get("allowWebSearch") if "allowWebSearch" in data else data.get("allow_web_search"),
+                        bool(current.get("allowWebSearch")),
+                    ),
+                    to_bool_int(
+                        data.get("requireCitation") if "requireCitation" in data else data.get("require_citation"),
+                        bool(current.get("requireCitation")),
+                    ),
                     ts,
                     kb_id,
                 ),
@@ -434,17 +472,20 @@ class RagRepository:
         answer: str,
         sources: list[dict[str, Any]],
         used_web: bool = False,
+        coverage_score: float | None = None,
+        mode: str = "strict",
         intent_type: str = "rag",
     ) -> str:
         top1_score = float(sources[0].get("rerankScore") or sources[0].get("score") or 0) if sources else 0
+        coverage = top1_score if coverage_score is None else float(coverage_score)
         log_id = make_id("qa")
         with self.db.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO qa_log (
                   id, owner_id, conversation_id, knowledge_base_ids_json, query, answer_text,
-                  sources_json, top1_score, coverage_score, used_web, intent_type, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  sources_json, top1_score, coverage_score, used_web, mode, intent_type, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     log_id,
@@ -455,8 +496,9 @@ class RagRepository:
                     answer,
                     to_json(sources),
                     top1_score,
-                    top1_score,
+                    coverage,
                     1 if used_web else 0,
+                    normalize_mode(mode),
                     intent_type,
                     now_iso(),
                 ),
@@ -529,18 +571,15 @@ class RagRepository:
                 raise ApiError(403, "没有删除该标注的权限")
             conn.execute("DELETE FROM annotation WHERE id = ?", (annotation_id,))
 
-    def analytics(self, knowledge_base_id: str, principal: Principal) -> dict[str, Any]:
+    def analytics(
+        self,
+        knowledge_base_id: str,
+        principal: Principal,
+        coverage_threshold: float = 0.4,
+        min_frequency: int = 3,
+    ) -> dict[str, Any]:
         self.require_knowledge_base(knowledge_base_id, principal)
-        with self.db.connect() as conn:
-            logs = conn.execute(
-                """
-                SELECT * FROM qa_log
-                WHERE knowledge_base_ids_json LIKE ?
-                ORDER BY created_at DESC
-                """,
-                (f"%{knowledge_base_id}%",),
-            ).fetchall()
-        items = [dict(row) for row in logs]
+        items = self._analytics_logs(knowledge_base_id)
         return {
             "logs": items,
             "hotQuestions": self._hot_questions(items),
@@ -548,8 +587,18 @@ class RagRepository:
             "citationCoverage": self._citation_coverage(items),
             "webTriggerRate": self._web_trigger_rate(items),
             "feedbackStats": self._feedback_stats(items),
-            "resourceGaps": self._resource_gaps(items),
+            "resourceGaps": self._resource_gaps(items, coverage_threshold, min_frequency),
         }
+
+    def resource_gaps(
+        self,
+        knowledge_base_id: str,
+        principal: Principal,
+        coverage_threshold: float,
+        min_frequency: int,
+    ) -> list[dict[str, Any]]:
+        self.require_knowledge_base(knowledge_base_id, principal)
+        return self._resource_gaps(self._analytics_logs(knowledge_base_id), coverage_threshold, min_frequency)
 
     def _normalize_kb_row(self, data: dict[str, Any]) -> dict[str, Any]:
         document_count = int(data.get("document_count") or 0)
@@ -558,8 +607,8 @@ class RagRepository:
             "name": data["name"],
             "description": data.get("description") or "",
             "courseId": data.get("course_id") or "",
-            "courseName": data.get("course_id") or "",
-            "term": "",
+            "courseName": data.get("course_name") or "",
+            "term": data.get("term") or "",
             "embeddingModel": data.get("embedding_model") or "",
             "embeddingDimensions": data.get("embedding_dimensions") or 1024,
             "chunkSize": data.get("chunk_size") or 512,
@@ -568,9 +617,9 @@ class RagRepository:
             "boundClassIds": from_json(data.get("class_ids_json"), []),
             "documentCount": document_count,
             "docCount": document_count,
-            "defaultMode": "strict",
-            "allowWebSearch": False,
-            "requireCitation": True,
+            "defaultMode": normalize_mode(data.get("default_mode")),
+            "allowWebSearch": bool(data.get("allow_web_search")),
+            "requireCitation": bool(data.get("require_citation")),
             "createdAt": data.get("created_at"),
             "updatedAt": data.get("updated_at"),
         }
@@ -627,7 +676,7 @@ class RagRepository:
         for item in logs:
             counts[item["query"]] = counts.get(item["query"], 0) + 1
         return [
-            {"question": question, "count": count}
+            {"query": question, "question": question, "count": count}
             for question, count in sorted(counts.items(), key=lambda entry: entry[1], reverse=True)[:20]
         ]
 
@@ -656,14 +705,46 @@ class RagRepository:
         thumbs_down = sum(1 for item in logs if item.get("feedback") == -1)
         return {"thumbsUp": thumbs_up, "thumbsDown": thumbs_down, "total": thumbs_up + thumbs_down}
 
-    def _resource_gaps(self, logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        gaps = [
-            {
-                "query": item["query"],
-                "frequency": 1,
-                "avgCoverage": float(item.get("coverage_score") or 0),
-            }
-            for item in logs
-            if float(item.get("coverage_score") or 0) < 0.4
-        ]
+    def _resource_gaps(
+        self,
+        logs: list[dict[str, Any]],
+        coverage_threshold: float,
+        min_frequency: int,
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, float]] = {}
+        for item in logs:
+            query = str(item.get("query") or "").strip()
+            if not query:
+                continue
+            coverage = float(item.get("coverage_score") or 0)
+            bucket = grouped.setdefault(query, {"count": 0, "coverageTotal": 0})
+            bucket["count"] += 1
+            bucket["coverageTotal"] += coverage
+
+        gaps: list[dict[str, Any]] = []
+        for query, stats in grouped.items():
+            count = int(stats["count"])
+            avg_coverage = stats["coverageTotal"] / count if count else 0
+            if count >= min_frequency and avg_coverage < coverage_threshold:
+                gaps.append(
+                    {
+                        "query": query,
+                        "count": count,
+                        "frequency": count,
+                        "avgCoverage": avg_coverage,
+                    }
+                )
+        gaps.sort(key=lambda item: (-item["count"], item["avgCoverage"]))
         return gaps[:20]
+
+    def _analytics_logs(self, knowledge_base_id: str) -> list[dict[str, Any]]:
+        with self.db.connect() as conn:
+            logs = conn.execute(
+                """
+                SELECT * FROM qa_log
+                WHERE knowledge_base_ids_json LIKE ?
+                ORDER BY created_at DESC
+                """,
+                (f"%{knowledge_base_id}%",),
+            ).fetchall()
+        return [dict(row) for row in logs]

@@ -71,8 +71,10 @@ def analytics(
     knowledge_base_id: str,
     principal: Annotated[Principal, Depends(current_principal)],
     repository: Annotated[RagRepository, Depends(get_repository)],
+    coverage_threshold: float = Query(default=0.4, ge=0, le=1, alias="coverageThreshold"),
+    min_frequency: int = Query(default=3, ge=1, alias="minFrequency"),
 ) -> dict:
-    return api_success(repository.analytics(knowledge_base_id, principal))
+    return api_success(repository.analytics(knowledge_base_id, principal, coverage_threshold, min_frequency))
 
 
 @router.get("/knowledge-base/{knowledge_base_id}/analytics/hot-questions")
@@ -132,5 +134,7 @@ def resource_gaps(
     knowledge_base_id: str,
     principal: Annotated[Principal, Depends(current_principal)],
     repository: Annotated[RagRepository, Depends(get_repository)],
+    coverage_threshold: float = Query(default=0.4, ge=0, le=1, alias="coverageThreshold"),
+    min_frequency: int = Query(default=3, ge=1, alias="minFrequency"),
 ) -> dict:
-    return api_success(repository.analytics(knowledge_base_id, principal)["resourceGaps"])
+    return api_success(repository.resource_gaps(knowledge_base_id, principal, coverage_threshold, min_frequency))

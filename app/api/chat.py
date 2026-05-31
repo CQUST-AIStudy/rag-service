@@ -54,6 +54,7 @@ async def legacy_chat_stream(
     normalized = ChatRequest(
         query=request.query,
         knowledgeBaseIds=[str(kb_id)] if kb_id else [],
+        mode=request.mode,
         options=request.options or {},
     )
     return StreamingResponse(

@@ -19,6 +19,27 @@ class Database:
         self.settings.chroma_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._ensure_compat_columns(conn)
+
+    def _ensure_compat_columns(self, conn: sqlite3.Connection) -> None:
+        self._ensure_columns(
+            conn,
+            "knowledge_base",
+            {
+                "course_name": "TEXT NOT NULL DEFAULT ''",
+                "term": "TEXT NOT NULL DEFAULT ''",
+                "default_mode": "TEXT NOT NULL DEFAULT 'strict'",
+                "allow_web_search": "INTEGER NOT NULL DEFAULT 0",
+                "require_citation": "INTEGER NOT NULL DEFAULT 1",
+            },
+        )
+        self._ensure_columns(conn, "qa_log", {"mode": "TEXT NOT NULL DEFAULT 'strict'"})
+
+    def _ensure_columns(self, conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -52,12 +73,17 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   course_id TEXT NOT NULL DEFAULT '',
+  course_name TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
   embedding_model TEXT NOT NULL,
   embedding_dimensions INTEGER NOT NULL DEFAULT 1024,
   chunk_size INTEGER NOT NULL DEFAULT 512,
   chunk_overlap INTEGER NOT NULL DEFAULT 64,
   doc_visibility TEXT NOT NULL DEFAULT 'public',
   class_ids_json TEXT NOT NULL DEFAULT '[]',
+  default_mode TEXT NOT NULL DEFAULT 'strict',
+  allow_web_search INTEGER NOT NULL DEFAULT 0,
+  require_citation INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -126,6 +152,7 @@ CREATE TABLE IF NOT EXISTS qa_log (
   top1_score REAL NOT NULL DEFAULT 0,
   coverage_score REAL NOT NULL DEFAULT 0,
   used_web INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'strict',
   feedback INTEGER,
   intent_type TEXT NOT NULL DEFAULT 'rag',
   created_at TEXT NOT NULL

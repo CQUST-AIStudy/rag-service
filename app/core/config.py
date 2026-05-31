@@ -36,7 +36,13 @@ class Settings(BaseSettings):
     default_top_k: int = Field(10, alias="RAG_DEFAULT_TOP_K")
     default_rerank_top_n: int = Field(3, alias="RAG_DEFAULT_RERANK_TOP_N")
     default_score_threshold: float = Field(0.0, alias="RAG_DEFAULT_SCORE_THRESHOLD")
+    coverage_threshold: float = Field(0.4, alias="RAG_COVERAGE_THRESHOLD")
     max_upload_mb: int = Field(50, alias="RAG_MAX_UPLOAD_MB")
+
+    tavily_api_key: str = Field("", alias="TAVILY_API_KEY")
+    tavily_search_url: str = Field("https://api.tavily.com/search", alias="TAVILY_SEARCH_URL")
+    web_fallback_enabled: bool = Field(True, alias="RAG_WEB_FALLBACK_ENABLED")
+    web_max_results: int = Field(5, alias="RAG_WEB_MAX_RESULTS")
 
     model_config = SettingsConfigDict(
         env_file=".env",
