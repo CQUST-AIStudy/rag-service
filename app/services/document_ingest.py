@@ -49,11 +49,25 @@ class DocumentIngestService:
                 token_count=token_count,
             )
         except Exception as exc:
+            error_message = str(exc)
+            try:
+                self._cleanup_document_artifacts(doc["documentId"])
+            except Exception as cleanup_exc:
+                error_message = f"{error_message}; 清理失败: {cleanup_exc}"
             self.repository.update_document_status(
                 doc["documentId"],
                 "failed",
-                error_message=str(exc)[:1000],
+                chunk_count=0,
+                token_count=0,
+                error_message=error_message[:1000],
             )
+
+    def _cleanup_document_artifacts(self, document_id: str) -> None:
+        try:
+            self.vector_store.delete_by_document(document_id)
+        except Exception:
+            pass
+        self.repository.delete_chunks_by_document(document_id)
 
     def _raw_document_path(self, doc: dict[str, Any]) -> str:
         # stored_path is intentionally not exposed in the public document response.

@@ -342,6 +342,10 @@ class RagRepository:
                 )
         return created
 
+    def delete_chunks_by_document(self, document_id: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM chunk WHERE document_id = ?", (document_id,))
+
     def list_chunks(self, knowledge_base_id: str, principal: Principal) -> list[dict[str, Any]]:
         self.require_knowledge_base(knowledge_base_id, principal)
         with self.db.connect() as conn:
