@@ -13,11 +13,11 @@ def test_dev_auth_allows_missing_secret():
     assert principal.role == "TEACHER"
 
 
-def test_jwt_auth_parses_java_token():
-    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap-backend")
+def test_jwt_auth_parses_tap_token():
+    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap")
     token = jwt.encode(
         {
-            "iss": "tap-backend",
+            "iss": "tap",
             "sub": "teacher",
             "uid": 12,
             "role": "TEACHER",
@@ -35,7 +35,7 @@ def test_jwt_auth_parses_java_token():
 
 
 def test_jwt_auth_rejects_missing_token_when_secret_configured():
-    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap-backend")
+    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap")
     try:
         current_principal(None, settings)
     except ApiError as exc:

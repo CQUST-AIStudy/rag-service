@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,8 +16,14 @@ class Settings(BaseSettings):
         alias="RAG_ALLOWED_ORIGINS",
     )
 
-    jwt_secret: str = Field("", alias="RAG_JWT_SECRET")
-    jwt_issuer: str = Field("tap-backend", alias="RAG_JWT_ISSUER")
+    jwt_secret: str = Field(
+        "",
+        validation_alias=AliasChoices("RAG_JWT_SECRET", "JWT_SECRET"),
+    )
+    jwt_issuer: str = Field(
+        "tap",
+        validation_alias=AliasChoices("RAG_JWT_ISSUER", "JWT_ISSUER"),
+    )
 
     dashscope_api_key: str = Field("", alias="DASHSCOPE_API_KEY")
     dashscope_compat_base_url: str = Field(
