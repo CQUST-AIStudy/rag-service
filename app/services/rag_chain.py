@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -14,6 +15,8 @@ from app.services.dashscope import DashScopeReranker
 from app.services.repository import RagRepository, normalize_mode
 from app.services.vector_store import VectorStore
 from app.services.web_fallback import TavilyWebFallbackService
+
+CHINA_STANDARD_TIME = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 @dataclass
@@ -143,11 +146,7 @@ class RagChainService:
         allow_web_search = any(bool(item.get("allowWebSearch")) for item in knowledge_bases)
         used_web = False
 
-        if (
-            effective_mode == "open"
-            and allow_web_search
-            and coverage_score < self.settings.coverage_threshold
-        ):
+        if effective_mode == "open" and allow_web_search:
             web_sources = await self.web_fallback.search(request.query, self.settings.web_max_results)
             if web_sources:
                 sources = [*sources, *web_sources]
@@ -247,13 +246,23 @@ class RagChainService:
             f"[{index + 1}] {item.get('fileName') or item['documentId']}\n{item['content']}"
             for index, item in enumerate(sources)
         )
+        current_date_context = self._current_date_context()
         system = (
             "你是重庆科技大学数据结构课程的 RAG 学习助手。"
+            f"{current_date_context}"
             "请优先依据给定资料回答，保持准确、清晰，并在需要时引用 [1]、[2] 这样的来源编号。"
+            "如果问题涉及“最新”“当前”“现在”“今年”“截至今日”等时间敏感信息，必须以当前日期为基准判断资料时效；"
+            "不要把课程资料或网页快照中的旧年份当作当前年份。"
+            "当课程资料与 Web 来源冲突时，优先采用更新、更权威的 Web 或官方来源，并说明旧资料可能已过期。"
+            "如果资料只给出版本号但没有可靠日期，不要自行编造发布日期。"
             "如果资料不足，请明确说明依据不足，不要编造。"
         )
         user = f"资料：\n{context or '（未检索到相关资料）'}\n\n问题：{query}"
         return [SystemMessage(content=system), HumanMessage(content=user)]
+
+    def _current_date_context(self) -> str:
+        today = datetime.now(CHINA_STANDARD_TIME).date()
+        return f"当前日期是 {today.isoformat()}（北京时间，Asia/Shanghai）。"
 
     def _save_chat(
         self,

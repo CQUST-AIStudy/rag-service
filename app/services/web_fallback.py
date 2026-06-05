@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 
 import httpx
 
 from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class TavilyWebFallbackService:
@@ -10,7 +13,11 @@ class TavilyWebFallbackService:
         self.settings = settings
 
     async def search(self, query: str, max_results: int | None = None) -> list[dict[str, Any]]:
-        if not self.settings.web_fallback_enabled or not self.settings.tavily_api_key:
+        if not self.settings.web_fallback_enabled:
+            logger.info("Web fallback is disabled by RAG_WEB_FALLBACK_ENABLED.")
+            return []
+        if not self.settings.tavily_api_key:
+            logger.warning("Web fallback is unavailable because TAVILY_API_KEY is not configured.")
             return []
 
         result_count = max(1, min(max_results or self.settings.web_max_results, 10))
@@ -25,7 +32,8 @@ class TavilyWebFallbackService:
                 response = await client.post(self.settings.tavily_search_url, json=payload)
                 response.raise_for_status()
                 data = response.json()
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Tavily web fallback search failed: %s", exc)
             return []
 
         results = data.get("results") or []
