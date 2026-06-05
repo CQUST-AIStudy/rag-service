@@ -95,10 +95,10 @@ def hit_rate(
     repository: Annotated[RagRepository, Depends(get_repository)],
     threshold: float = Query(default=0.4),
 ) -> dict:
-    logs = repository.analytics(knowledge_base_id, principal)["logs"]
+    logs = repository.analytics(knowledge_base_id, principal, threshold)["logs"]
     if not logs:
         return api_success({"hitRate": 0})
-    hits = sum(1 for item in logs if float(item.get("top1_score") or 0) >= threshold)
+    hits = sum(1 for item in logs if float(item.get("coverage_score") or 0) >= threshold)
     return api_success({"hitRate": hits / len(logs)})
 
 

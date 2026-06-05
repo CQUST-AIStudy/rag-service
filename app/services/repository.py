@@ -584,14 +584,17 @@ class RagRepository:
     ) -> dict[str, Any]:
         self.require_knowledge_base(knowledge_base_id, principal)
         items = self._analytics_logs(knowledge_base_id)
+        citation_coverage = self._citation_coverage(items)
+        feedback_stats = self._feedback_stats(items)
         return {
             "logs": items,
             "hotQuestions": self._hot_questions(items),
-            "hitRate": self._hit_rate(items, 0.4),
-            "citationCoverage": self._citation_coverage(items),
+            "hitRate": self._hit_rate(items, coverage_threshold),
+            "citationCoverage": citation_coverage,
             "webTriggerRate": self._web_trigger_rate(items),
-            "feedbackStats": self._feedback_stats(items),
+            "feedbackStats": feedback_stats,
             "resourceGaps": self._resource_gaps(items, coverage_threshold, min_frequency),
+            "summary": self._analytics_summary(items, coverage_threshold, citation_coverage, feedback_stats),
         }
 
     def resource_gaps(
@@ -687,10 +690,10 @@ class RagRepository:
     def _hit_rate(self, logs: list[dict[str, Any]], threshold: float) -> float:
         if not logs:
             return 0
-        hits = sum(1 for item in logs if float(item.get("top1_score") or 0) >= threshold)
+        hits = self._hit_count(logs, threshold)
         return hits / len(logs)
 
-    def _citation_coverage(self, logs: list[dict[str, Any]]) -> dict[str, int]:
+    def _legacy_citation_coverage(self, logs: list[dict[str, Any]]) -> dict[str, int]:
         coverage: dict[str, int] = {}
         for item in logs:
             for source in from_json(item.get("sources_json"), []):
@@ -741,14 +744,62 @@ class RagRepository:
         gaps.sort(key=lambda item: (-item["count"], item["avgCoverage"]))
         return gaps[:20]
 
+    def _analytics_summary(
+        self,
+        logs: list[dict[str, Any]],
+        coverage_threshold: float,
+        citation_coverage: dict[str, int],
+        feedback_stats: dict[str, int],
+    ) -> dict[str, Any]:
+        feedback_rated_total = int(feedback_stats["total"])
+        satisfaction_rate = (
+            feedback_stats["thumbsUp"] / feedback_rated_total
+            if feedback_rated_total
+            else None
+        )
+        return {
+            "totalQuestions": len(logs),
+            "hitCount": self._hit_count(logs, coverage_threshold),
+            "webTriggerCount": sum(1 for item in logs if int(item.get("used_web") or 0) == 1),
+            "feedbackRatedTotal": feedback_rated_total,
+            "thumbsUp": feedback_stats["thumbsUp"],
+            "thumbsDown": feedback_stats["thumbsDown"],
+            "satisfactionRate": satisfaction_rate,
+            "citationCount": sum(citation_coverage.values()),
+            "citedDocumentCount": len(citation_coverage),
+        }
+
+    def _hit_count(self, logs: list[dict[str, Any]], threshold: float) -> int:
+        return sum(1 for item in logs if float(item.get("coverage_score") or 0) >= threshold)
+
+    def _is_local_source(self, source: dict[str, Any]) -> bool:
+        metadata = source.get("metadata") or {}
+        source_type = str(source.get("source") or metadata.get("source") or "").lower()
+        document_id = str(source.get("documentId") or "")
+        chunk_id = str(source.get("chunkId") or "")
+        return source_type != "web" and not document_id.startswith("web:") and not chunk_id.startswith("web:")
+
+    def _citation_coverage(self, logs: list[dict[str, Any]]) -> dict[str, int]:
+        coverage: dict[str, int] = {}
+        for item in logs:
+            for source in from_json(item.get("sources_json"), []):
+                if not self._is_local_source(source):
+                    continue
+                name = source.get("fileName") or source.get("documentId") or "引用资料"
+                coverage[name] = coverage.get(name, 0) + 1
+        return coverage
+
     def _analytics_logs(self, knowledge_base_id: str) -> list[dict[str, Any]]:
+        normalized_id = str(knowledge_base_id)
         with self.db.connect() as conn:
-            logs = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM qa_log
-                WHERE knowledge_base_ids_json LIKE ?
                 ORDER BY created_at DESC
-                """,
-                (f"%{knowledge_base_id}%",),
+                """
             ).fetchall()
-        return [dict(row) for row in logs]
+        return [
+            dict(row)
+            for row in rows
+            if normalized_id in {str(item) for item in from_json(row["knowledge_base_ids_json"], [])}
+        ]
