@@ -38,7 +38,7 @@ def test_embed_documents_batches_requests_and_keeps_order(monkeypatch, tmp_path)
             )
 
     monkeypatch.setattr(dashscope.httpx, "Client", FakeClient)
-    settings = Settings(data_dir=tmp_path, dashscope_api_key="test-key")
+    settings = Settings(data_dir=tmp_path, dashscope_api_key="test-key", _env_file=None)
     embeddings = DashScopeEmbeddings(settings)
 
     vectors = embeddings.embed_documents([f"text-{index}" for index in range(25)])
@@ -70,7 +70,7 @@ def test_embed_documents_includes_dashscope_error_detail(monkeypatch, tmp_path):
             )
 
     monkeypatch.setattr(dashscope.httpx, "Client", FakeClient)
-    settings = Settings(data_dir=tmp_path, dashscope_api_key="test-key")
+    settings = Settings(data_dir=tmp_path, dashscope_api_key="test-key", _env_file=None)
     embeddings = DashScopeEmbeddings(settings)
 
     with pytest.raises(ApiError) as exc_info:

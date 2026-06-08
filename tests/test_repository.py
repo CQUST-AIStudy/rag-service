@@ -1,11 +1,12 @@
 from app.core.auth import Principal
 from app.core.config import Settings
+from app.core.responses import ApiError
 from app.services.database import Database
 from app.services.repository import RagRepository
 
 
 def make_repository(tmp_path):
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, _env_file=None)
     db = Database(settings)
     db.initialize()
     return RagRepository(db)
@@ -293,3 +294,175 @@ def test_analytics_summary_uses_exact_kb_match_and_real_log_fields(tmp_path):
         "citationCount": 2,
         "citedDocumentCount": 2,
     }
+
+
+def test_get_chunks_by_ids_for_knowledge_bases_filters_kb_scope(tmp_path):
+    repository = make_repository(tmp_path)
+    principal = Principal(user_id="1", username="teacher", role="TEACHER")
+    first_kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Data Structures",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+    second_kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Algorithms",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+    first_doc = repository.create_document(principal, first_kb["id"], "first.md", str(tmp_path / "first.md"), "", {})
+    second_doc = repository.create_document(
+        principal,
+        second_kb["id"],
+        "second.md",
+        str(tmp_path / "second.md"),
+        "",
+        {},
+    )
+    first_chunk = repository.replace_chunks(
+        first_kb["id"],
+        first_doc["documentId"],
+        [{"content": "first", "metadata": {}}],
+    )[0]
+    second_chunk = repository.replace_chunks(
+        second_kb["id"],
+        second_doc["documentId"],
+        [{"content": "second", "metadata": {}}],
+    )[0]
+
+    chunks = repository.get_chunks_by_ids_for_knowledge_bases(
+        [first_chunk["id"], second_chunk["id"]],
+        [first_kb["id"]],
+    )
+
+    assert [item["chunkId"] for item in chunks] == [first_chunk["id"]]
+
+
+def test_create_or_touch_conversation_rejects_non_owner(tmp_path):
+    repository = make_repository(tmp_path)
+    owner = Principal(user_id="1", username="teacher", role="TEACHER")
+    attacker = Principal(user_id="2", username="student", role="STUDENT")
+    kb = repository.create_knowledge_base(
+        owner,
+        {
+            "name": "Algorithms",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+    conversation_id = repository.create_or_touch_conversation(owner, None, [kb["id"]], "owner question")
+
+    try:
+        repository.create_or_touch_conversation(attacker, conversation_id, [kb["id"]], "attacker question")
+    except ApiError as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError("non-owner should not reuse another user's conversation")
+
+
+def test_analytics_filters_logs_by_role(tmp_path):
+    repository = make_repository(tmp_path)
+    teacher = Principal(user_id="teacher", username="teacher", role="TEACHER")
+    student = Principal(user_id="student", username="student", role="STUDENT")
+    other_student = Principal(user_id="other", username="other", role="STUDENT")
+    admin = Principal(user_id="admin", username="admin", role="ADMIN")
+    kb = repository.create_knowledge_base(
+        teacher,
+        {
+            "name": "Algorithms",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+            "docVisibility": "public",
+        },
+        embedding_dimensions=1024,
+    )
+    repository.save_qa_log(teacher, "conv-1", [kb["id"]], "teacher question", "answer", [], coverage_score=0.8)
+    repository.save_qa_log(student, "conv-2", [kb["id"]], "student question", "answer", [], coverage_score=0.7)
+    repository.save_qa_log(other_student, "conv-3", [kb["id"]], "other question", "answer", [], coverage_score=0.6)
+
+    teacher_logs = repository.analytics(kb["id"], teacher)["logs"]
+    admin_logs = repository.analytics(kb["id"], admin)["logs"]
+    student_logs = repository.analytics(kb["id"], student)["logs"]
+
+    assert {item["query"] for item in teacher_logs} == {"teacher question", "student question", "other question"}
+    assert {item["query"] for item in admin_logs} == {"teacher question", "student question", "other question"}
+    assert [item["query"] for item in student_logs] == ["student question"]
+
+
+def test_create_annotation_rejects_chunk_from_other_knowledge_base(tmp_path):
+    repository = make_repository(tmp_path)
+    principal = Principal(user_id="1", username="teacher", role="TEACHER")
+    first_kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Data Structures",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+    second_kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Algorithms",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+    second_doc = repository.create_document(
+        principal,
+        second_kb["id"],
+        "second.md",
+        str(tmp_path / "second.md"),
+        "",
+        {},
+    )
+    second_chunk = repository.replace_chunks(
+        second_kb["id"],
+        second_doc["documentId"],
+        [{"content": "second", "metadata": {}}],
+    )[0]
+
+    try:
+        repository.create_annotation(first_kb["id"], second_chunk["id"], "important", "note", principal)
+    except ApiError as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("cross-knowledge-base chunk annotation should be rejected")
+
+
+def test_create_annotation_rejects_missing_chunk(tmp_path):
+    repository = make_repository(tmp_path)
+    principal = Principal(user_id="1", username="teacher", role="TEACHER")
+    kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Data Structures",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+        },
+        embedding_dimensions=1024,
+    )
+
+    try:
+        repository.create_annotation(kb["id"], "missing-chunk", "important", "note", principal)
+    except ApiError as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("missing chunk annotation should be rejected")

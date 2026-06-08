@@ -8,13 +8,13 @@ from app.core.responses import ApiError
 
 
 def test_dev_auth_allows_missing_secret():
-    principal = current_principal(None, Settings(env="local", jwt_secret=""))
+    principal = current_principal(None, Settings(env="local", jwt_secret="", _env_file=None))
     assert principal.user_id == "dev"
     assert principal.role == "TEACHER"
 
 
 def test_jwt_auth_parses_tap_token():
-    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap")
+    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap", _env_file=None)
     token = jwt.encode(
         {
             "iss": "tap",
@@ -35,7 +35,7 @@ def test_jwt_auth_parses_tap_token():
 
 
 def test_jwt_auth_rejects_missing_token_when_secret_configured():
-    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap")
+    settings = Settings(jwt_secret="x" * 32, jwt_issuer="tap", _env_file=None)
     try:
         current_principal(None, settings)
     except ApiError as exc:

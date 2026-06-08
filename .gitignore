@@ -1,7 +1,74 @@
-.env
-.venv/
-data/
+# === Python bytecode ===
 __pycache__/
 *.py[cod]
+*$py.class
+*.pyd
+*.so
+
+# === Python packaging ===
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+pip-wheel-metadata/
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Test, lint and coverage caches ===
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# === Environment and secrets ===
+.env
+.env.*
+!.env.example
+
+# === Local runtime data and vector stores ===
+data/
+chroma_db/
+.chroma/
+uploads/
+tmp/
+temp/
+.cache/
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# === Logs ===
+*.log
+logs/
+*.pid
+
+# === IDE and local tools ===
+.vscode/
+.idea/
+.claude/
+.codex/
+.agents/
+*.swp
+*.swo
+*~
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === uv / local Python version ===
+.python-version

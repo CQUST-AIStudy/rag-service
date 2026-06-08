@@ -35,6 +35,9 @@ class FakeVectorStore:
             if item["knowledgeBaseId"] in knowledge_base_ids
         ][:top_k]
 
+    def hybrid_search(self, query, knowledge_base_ids, top_k):
+        return self.similarity_search(query, knowledge_base_ids, top_k)
+
 
 class FakeReranker:
     def rerank(self, query, chunks, top_n):
@@ -47,7 +50,7 @@ class FakeWebFallback:
 
 
 def make_repository(tmp_path):
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, _env_file=None)
     db = Database(settings)
     db.initialize()
     return settings, RagRepository(db)

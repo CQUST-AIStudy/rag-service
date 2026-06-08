@@ -96,18 +96,35 @@ class DocumentIngestService:
         return path.read_text(errors="ignore")
 
     def _load_pdf(self, path: Path) -> list[dict[str, Any]]:
-        from pypdf import PdfReader
+        """PDF 全文提取后统一切分，避免跨页断裂"""
+        import pdfplumber
 
-        reader = PdfReader(str(path))
-        pages = []
-        for index, page in enumerate(reader.pages):
-            pages.append(
-                {
-                    "content": page.extract_text() or "",
-                    "metadata": {"source": path.name, "page": index + 1},
-                }
-            )
-        return pages
+        with pdfplumber.open(str(path)) as pdf:
+            pages_text: list[str] = []
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                # 提取表格并转为 Markdown 格式保留结构
+                tables = page.extract_tables()
+                for table in tables:
+                    if table:
+                        md_table = self._table_to_markdown(table)
+                        text += "\n\n" + md_table
+                pages_text.append(text)
+
+        full_text = "\n\n".join(pages_text)
+        return [{"content": full_text, "metadata": {"source": path.name}}]
+
+    def _table_to_markdown(self, table: list[list[str | None]]) -> str:
+        """将 pdfplumber 提取的表格转为 Markdown 表格"""
+        if not table or not table[0]:
+            return ""
+        rows: list[str] = []
+        for i, row in enumerate(table):
+            cells = [str(cell or "").replace("\n", " ").strip() for cell in row]
+            rows.append("| " + " | ".join(cells) + " |")
+            if i == 0:
+                rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
+        return "\n".join(rows)
 
     def _load_docx(self, path: Path) -> list[dict[str, Any]]:
         import docx2txt
@@ -116,9 +133,18 @@ class DocumentIngestService:
 
     def _split_texts(self, texts: list[dict[str, Any]], kb: dict[str, Any]) -> list[dict[str, Any]]:
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=int(kb.get("chunkSize") or 512),
-            chunk_overlap=int(kb.get("chunkOverlap") or 64),
-            separators=["\n\n", "\n", "。", "！", "？", ".", " ", ""],
+            chunk_size=int(kb.get("chunkSize") or 1500),
+            chunk_overlap=int(kb.get("chunkOverlap") or 300),
+            separators=[
+                "\n## ", "\n### ", "\n#### ",   # Markdown 标题优先
+                "\n\n",                          # 段落分隔
+                "。\n", "！\n", "？\n",           # 中文句末+换行
+                "\n",                            # 普通换行
+                "。", "！", "？",                # 中文句末
+                "；", "：", "，",                # 中文标点补充
+                ".", "!", "?",                   # 英文句末
+                " ", "",                         # 兜底
+            ],
         )
         chunks: list[dict[str, Any]] = []
         for item in texts:

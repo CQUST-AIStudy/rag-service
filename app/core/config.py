@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     rerank_model: str = Field("qwen3-vl-rerank", alias="RAG_RERANK_MODEL")
     chat_model: str = Field("qwen-plus", alias="RAG_CHAT_MODEL")
 
-    default_top_k: int = Field(10, alias="RAG_DEFAULT_TOP_K")
-    default_rerank_top_n: int = Field(3, alias="RAG_DEFAULT_RERANK_TOP_N")
+    default_top_k: int = Field(30, alias="RAG_DEFAULT_TOP_K")
+    default_rerank_top_n: int = Field(5, alias="RAG_DEFAULT_RERANK_TOP_N")
     default_score_threshold: float = Field(0.0, alias="RAG_DEFAULT_SCORE_THRESHOLD")
     coverage_threshold: float = Field(0.4, alias="RAG_COVERAGE_THRESHOLD")
     max_upload_mb: int = Field(50, alias="RAG_MAX_UPLOAD_MB")

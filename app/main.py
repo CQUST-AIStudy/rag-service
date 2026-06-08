@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +10,7 @@ from app.core.responses import ApiError, api_error_response
 from app.services.dependencies import get_database
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.service_name)
 
@@ -37,7 +40,8 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 
 @app.exception_handler(Exception)
 async def unhandled_error_handler(_request: Request, exc: Exception):
-    return api_error_response(500, f"服务内部错误: {exc}", 500)
+    logger.error("Unhandled RAG service error", exc_info=(type(exc), exc, exc.__traceback__))
+    return api_error_response(500, "服务内部错误，请稍后重试", 500)
 
 
 app.include_router(health.router)

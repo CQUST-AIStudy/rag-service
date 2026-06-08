@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -29,28 +28,22 @@ async def upload_document(
 ) -> dict:
     ingest_service.validate_extension(file.filename or "")
     meta = parse_metadata(metadata)
+    repository.require_knowledge_base(knowledge_base_id, principal, write=True)
     upload_id = make_id("upload")
     stored_path = settings.upload_dir / knowledge_base_id / f"{upload_id}_{Path(file.filename or 'file').name}"
-    stored_path.parent.mkdir(parents=True, exist_ok=True)
-
-    size = 0
-    with stored_path.open("wb") as target:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > settings.max_upload_bytes:
-                target.close()
-                stored_path.unlink(missing_ok=True)
-                raise ApiError(413, f"文件过大，最大支持 {settings.max_upload_mb}MB")
-            target.write(chunk)
-
-    document = repository.create_document(
-        principal,
-        knowledge_base_id,
-        file.filename or stored_path.name,
-        str(stored_path),
-        file.content_type or "",
-        meta,
-    )
+    await _save_upload_file(file, stored_path, settings)
+    try:
+        document = repository.create_document(
+            principal,
+            knowledge_base_id,
+            file.filename or stored_path.name,
+            str(stored_path),
+            file.content_type or "",
+            meta,
+        )
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
     background_tasks.add_task(ingest_service.process_document, document["documentId"])
     return api_success(
         {
@@ -143,6 +136,9 @@ def reprocess_document(
     repository: Annotated[RagRepository, Depends(get_repository)],
     ingest_service: Annotated[DocumentIngestService, Depends(get_document_ingest_service)],
 ) -> dict:
+    current = repository.require_document(document_id, principal)
+    if current["knowledgeBaseId"] != knowledge_base_id:
+        raise ApiError(404, "文档不存在或不属于该知识库")
     document = repository.queue_document_reprocess(document_id, principal)
     background_tasks.add_task(ingest_service.process_document, document["documentId"])
     return api_success(
@@ -178,21 +174,39 @@ async def upload_document_compat(
 ) -> dict:
     metadata = {"docType": doc_type}
     ingest_service.validate_extension(file.filename or "")
+    repository.require_knowledge_base(knowledge_base_id, principal, write=True)
     upload_id = make_id("upload")
     stored_path = settings.upload_dir / knowledge_base_id / f"{upload_id}_{Path(file.filename or 'file').name}"
-    stored_path.parent.mkdir(parents=True, exist_ok=True)
-    with stored_path.open("wb") as target:
-        shutil.copyfileobj(file.file, target)
-    document = repository.create_document(
-        principal,
-        knowledge_base_id,
-        file.filename or stored_path.name,
-        str(stored_path),
-        file.content_type or "",
-        metadata,
-    )
+    await _save_upload_file(file, stored_path, settings)
+    try:
+        document = repository.create_document(
+            principal,
+            knowledge_base_id,
+            file.filename or stored_path.name,
+            str(stored_path),
+            file.content_type or "",
+            metadata,
+        )
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
     background_tasks.add_task(ingest_service.process_document, document["documentId"])
     return api_success(document)
+
+
+async def _save_upload_file(file: UploadFile, stored_path: Path, settings: Settings) -> None:
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    size = 0
+    try:
+        with stored_path.open("wb") as target:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise ApiError(413, f"文件过大，最大支持 {settings.max_upload_mb}MB")
+                target.write(chunk)
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
 
 
 def _stored_path(repository: RagRepository, document_id: str) -> str | None:

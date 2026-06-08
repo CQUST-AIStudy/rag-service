@@ -10,8 +10,8 @@ class KnowledgeBaseCreate(BaseModel):
     courseName: str = ""
     term: str = ""
     embeddingModel: str = "text-embedding-v4"
-    chunkSize: int = Field(512, ge=128, le=4096)
-    chunkOverlap: int = Field(64, ge=0, le=1024)
+    chunkSize: int = Field(1500, ge=128, le=3000)
+    chunkOverlap: int = Field(300, ge=0, le=1024)
     docVisibility: str = "public"
     classIds: list[int | str] = Field(default_factory=list)
     defaultMode: str = "strict"
@@ -20,12 +20,12 @@ class KnowledgeBaseCreate(BaseModel):
 
 
 class RagOptions(BaseModel):
-    topK: int = Field(10, ge=1, le=50)
-    rerankTopN: int = Field(3, ge=1, le=20)
+    topK: int = Field(30, ge=1, le=100)
+    rerankTopN: int = Field(5, ge=1, le=20)
     scoreThreshold: float = Field(0.0, ge=0.0, le=1.0)
     enableRerank: bool = True
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
-    maxTokens: int = Field(1024, ge=64, le=8192)
+    temperature: float = Field(0.2, ge=0.0, le=2.0)
+    maxTokens: int = Field(2048, ge=64, le=8192)
 
 
 class ChatRequest(BaseModel):
@@ -39,7 +39,7 @@ class ChatRequest(BaseModel):
 class RetrieveRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
     knowledgeBaseIds: list[str] = Field(default_factory=list)
-    topK: int = Field(10, ge=1, le=50)
+    topK: int = Field(30, ge=1, le=100)
     enableRerank: bool = True
     rerankTopN: int = Field(5, ge=1, le=20)
     scoreThreshold: float = Field(0.0, ge=0.0, le=1.0)

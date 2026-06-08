@@ -379,6 +379,31 @@ class RagRepository:
         chunks = [self._normalize_chunk_row(dict(row)) for row in rows]
         return sorted(chunks, key=lambda item: order.get(item["id"], 0))
 
+    def get_chunks_by_ids_for_knowledge_bases(
+        self,
+        chunk_ids: list[str],
+        knowledge_base_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        if not chunk_ids or not knowledge_base_ids:
+            return []
+        chunk_placeholders = ",".join("?" for _ in chunk_ids)
+        kb_placeholders = ",".join("?" for _ in knowledge_base_ids)
+        params = [*chunk_ids, *knowledge_base_ids]
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT c.*, d.file_name
+                FROM chunk c
+                JOIN document d ON d.id = c.document_id
+                WHERE c.id IN ({chunk_placeholders})
+                  AND c.knowledge_base_id IN ({kb_placeholders})
+                """,
+                params,
+            ).fetchall()
+        order = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
+        chunks = [self._normalize_chunk_row(dict(row)) for row in rows]
+        return sorted(chunks, key=lambda item: order.get(item["chunkId"], 0))
+
     def create_or_touch_conversation(
         self,
         principal: Principal,
@@ -389,8 +414,10 @@ class RagRepository:
         ts = now_iso()
         conv_id = conversation_id or make_id("conv")
         with self.db.connect() as conn:
-            existing = conn.execute("SELECT id FROM conversation WHERE id = ?", (conv_id,)).fetchone()
+            existing = conn.execute("SELECT id, owner_id FROM conversation WHERE id = ?", (conv_id,)).fetchone()
             if existing:
+                if existing["owner_id"] != principal.user_id and not principal.is_admin:
+                    raise ApiError(403, "没有访问该会话的权限")
                 conn.execute(
                     "UPDATE conversation SET updated_at = ?, knowledge_base_ids_json = ? WHERE id = ?",
                     (ts, to_json(knowledge_base_ids), conv_id),
@@ -530,6 +557,15 @@ class RagRepository:
         annotation_id = make_id("anno")
         ts = now_iso()
         with self.db.connect() as conn:
+            chunk = conn.execute(
+                """
+                SELECT id FROM chunk
+                WHERE id = ? AND knowledge_base_id = ?
+                """,
+                (chunk_id, knowledge_base_id),
+            ).fetchone()
+            if not chunk:
+                raise ApiError(404, "切片不存在或不属于该知识库")
             conn.execute(
                 """
                 INSERT INTO annotation (
@@ -583,7 +619,7 @@ class RagRepository:
         min_frequency: int = 3,
     ) -> dict[str, Any]:
         self.require_knowledge_base(knowledge_base_id, principal)
-        items = self._analytics_logs(knowledge_base_id)
+        items = self._analytics_logs(knowledge_base_id, self._analytics_owner_filter(principal))
         citation_coverage = self._citation_coverage(items)
         feedback_stats = self._feedback_stats(items)
         return {
@@ -605,7 +641,11 @@ class RagRepository:
         min_frequency: int,
     ) -> list[dict[str, Any]]:
         self.require_knowledge_base(knowledge_base_id, principal)
-        return self._resource_gaps(self._analytics_logs(knowledge_base_id), coverage_threshold, min_frequency)
+        return self._resource_gaps(
+            self._analytics_logs(knowledge_base_id, self._analytics_owner_filter(principal)),
+            coverage_threshold,
+            min_frequency,
+        )
 
     def _normalize_kb_row(self, data: dict[str, Any]) -> dict[str, Any]:
         document_count = int(data.get("document_count") or 0)
@@ -789,14 +829,23 @@ class RagRepository:
                 coverage[name] = coverage.get(name, 0) + 1
         return coverage
 
-    def _analytics_logs(self, knowledge_base_id: str) -> list[dict[str, Any]]:
+    def _analytics_owner_filter(self, principal: Principal) -> str | None:
+        if principal.is_admin or principal.role.upper() == "TEACHER":
+            return None
+        return principal.user_id
+
+    def _analytics_logs(self, knowledge_base_id: str, owner_id: str | None = None) -> list[dict[str, Any]]:
         normalized_id = str(knowledge_base_id)
+        where_sql = "WHERE owner_id = ?" if owner_id is not None else ""
+        params = [owner_id] if owner_id is not None else []
         with self.db.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM qa_log
+                {where_sql}
                 ORDER BY created_at DESC
-                """
+                """,
+                params,
             ).fetchall()
         return [
             dict(row)

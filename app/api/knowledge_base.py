@@ -6,8 +6,9 @@ from app.core.auth import Principal, current_principal
 from app.core.config import Settings, get_settings
 from app.core.responses import api_success
 from app.schemas.rag import KnowledgeBaseCreate
-from app.services.dependencies import get_repository
+from app.services.dependencies import get_repository, get_vector_store
 from app.services.repository import RagRepository
+from app.services.vector_store import VectorStore
 
 router = APIRouter(prefix="/rag/knowledge-base", tags=["knowledge-base"])
 
@@ -56,6 +57,9 @@ def delete_knowledge_base(
     knowledge_base_id: str,
     principal: Annotated[Principal, Depends(current_principal)],
     repository: Annotated[RagRepository, Depends(get_repository)],
+    vector_store: Annotated[VectorStore, Depends(get_vector_store)],
 ) -> dict:
+    repository.require_knowledge_base(knowledge_base_id, principal, write=True)
+    vector_store.delete_by_knowledge_base(knowledge_base_id)
     repository.delete_knowledge_base(knowledge_base_id, principal)
     return api_success(None)
