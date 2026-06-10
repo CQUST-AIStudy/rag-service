@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import jwt
+import pytest
 
 from app.core.auth import current_principal
 from app.core.config import Settings
@@ -31,6 +32,34 @@ def test_jwt_auth_parses_tap_token():
 
     assert principal.user_id == "12"
     assert principal.username == "teacher"
+    assert principal.role == "TEACHER"
+
+
+@pytest.mark.parametrize(
+    ("secret", "algorithm"),
+    [
+        ("x" * 32, "HS256"),
+        ("x" * 48, "HS384"),
+        ("x" * 64, "HS512"),
+    ],
+)
+def test_jwt_auth_accepts_hmac_algorithms_used_by_jjwt(secret: str, algorithm: str):
+    settings = Settings(jwt_secret=secret, jwt_issuer="tap", _env_file=None)
+    token = jwt.encode(
+        {
+            "iss": "tap",
+            "sub": "teacher",
+            "uid": 12,
+            "role": "TEACHER",
+            "exp": datetime.now(UTC) + timedelta(minutes=5),
+        },
+        settings.jwt_secret,
+        algorithm=algorithm,
+    )
+
+    principal = current_principal(f"Bearer {token}", settings)
+
+    assert principal.user_id == "12"
     assert principal.role == "TEACHER"
 
 

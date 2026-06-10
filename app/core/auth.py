@@ -8,6 +8,8 @@ from jwt import InvalidTokenError
 from app.core.config import Settings, get_settings
 from app.core.responses import ApiError
 
+JWT_ALGORITHMS = ["HS256", "HS384", "HS512"]
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -53,7 +55,7 @@ def current_principal(
         payload = jwt.decode(
             token,
             settings.jwt_secret,
-            algorithms=["HS256"],
+            algorithms=JWT_ALGORITHMS,
             issuer=settings.jwt_issuer,
         )
     except InvalidTokenError as exc:
