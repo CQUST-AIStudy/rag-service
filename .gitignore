@@ -43,6 +43,7 @@ chroma_db/
 .chroma/
 uploads/
 tmp/
+.tmp/
 temp/
 .cache/
 *.db
