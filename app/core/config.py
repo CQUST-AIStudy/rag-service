@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         "",
         validation_alias=AliasChoices("RAG_JWT_SECRET", "JWT_SECRET"),
     )
+    jwt_accepted_secrets: str = Field(
+        "",
+        validation_alias=AliasChoices("RAG_JWT_ACCEPTED_SECRETS", "JWT_ACCEPTED_SECRETS"),
+    )
     jwt_issuer: str = Field(
         "tap",
         validation_alias=AliasChoices("RAG_JWT_ISSUER", "JWT_ISSUER"),
@@ -72,6 +76,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
+
+    @property
+    def accepted_jwt_secrets(self) -> list[str]:
+        return [item.strip() for item in self.jwt_accepted_secrets.split(",") if item.strip()]
 
     @property
     def max_upload_bytes(self) -> int:

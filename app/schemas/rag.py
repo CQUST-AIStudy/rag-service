@@ -36,6 +36,21 @@ class ChatRequest(BaseModel):
     options: RagOptions = Field(default_factory=RagOptions)
 
 
+class AssistantHistoryMessage(BaseModel):
+    role: str
+    content: str = Field("", max_length=8000)
+
+
+class AssistantRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=8000)
+    mode: str = Field("ai", pattern="^(ai|rag|web)$")
+    enableWebSearch: bool = False
+    knowledgeBaseIds: list[str] = Field(default_factory=list)
+    conversationId: str | None = None
+    history: list[AssistantHistoryMessage] = Field(default_factory=list)
+    options: RagOptions = Field(default_factory=RagOptions)
+
+
 class RetrieveRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
     knowledgeBaseIds: list[str] = Field(default_factory=list)

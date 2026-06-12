@@ -5,13 +5,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.auth import Principal
 from app.core.config import Settings
 from app.core.responses import ApiError
-from app.schemas.rag import ChatRequest, RagOptions, RetrieveRequest
+from app.schemas.rag import AssistantHistoryMessage, AssistantRequest, ChatRequest, RagOptions, RetrieveRequest
 from app.services.dashscope import DashScopeReranker
 from app.services.repository import RagRepository, normalize_mode
 from app.services.vector_store import VectorStore
@@ -33,6 +33,30 @@ HALLUCINATION_PATTERNS = [
 
 # --- 复杂查询关键词（触发 CoT）---
 COMPLEX_KEYWORDS = ["比较", "分析", "为什么", "如何", "区别", "优缺点", "解释", "原理", "证明", "推导"]
+
+MAX_ASSISTANT_HISTORY = 10
+
+ASSISTANT_SYSTEM_PROMPT = """
+## 角色定位
+你是重庆科技大学数据结构与算法学习助手，面向学生提供学习问答、概念解释、复杂度分析和代码思路辅导。
+
+## 回答要求
+- 默认使用中文回答，除非用户明确要求其他语言。
+- 回答要准确、清晰、适合学生理解。
+- 可以给出步骤、例子、伪代码或 C/C++/Python 片段，但不要编造课程资料或外部链接。
+- 如果用户问题不完整，先给出最可能的解释，并指出需要补充的信息。
+""".strip()
+
+WEB_ASSISTANT_SYSTEM_PROMPT = """
+## 角色定位
+你是重庆科技大学数据结构与算法学习助手，可以结合联网检索结果回答学生问题。
+
+## 回答要求
+- 默认使用中文回答，除非用户明确要求其他语言。
+- 优先依据提供的联网资料回答，并在关键事实后标注来源编号，如 [1]。
+- 如果联网资料不足，请明确说明检索结果有限，再给出谨慎的通用解释。
+- 不要编造不存在的链接、标题、发布日期或来源。
+""".strip()
 
 
 @dataclass
@@ -154,6 +178,84 @@ class RagChainService:
         except Exception:
             yield self._sse("error", {"message": "RAG 生成失败，请稍后重试", "code": 500})
 
+    async def stream_assistant(self, request: AssistantRequest, principal: Principal) -> AsyncIterator[str]:
+        request = self._assistant_request_with_defaults(request)
+        conversation_id = request.conversationId
+        answer_parts: list[str] = []
+        sources: list[dict[str, Any]] = []
+        effective_mode = request.mode
+        used_web = False
+        coverage_score = 0.0
+
+        try:
+            if request.mode == "rag":
+                prepared = await self._prepare_assistant_rag(request, principal)
+                conversation_id = prepared.conversation_id
+                sources = prepared.sources
+                effective_mode = prepared.effective_mode
+                used_web = prepared.used_web
+                coverage_score = prepared.coverage_score
+                messages = self._build_messages(request.query, sources)
+                knowledge_base_ids = prepared.knowledge_base_ids
+            else:
+                conversation_id = self.repository.create_or_touch_conversation(
+                    principal,
+                    request.conversationId,
+                    [],
+                    request.query,
+                )
+                sources = await self._assistant_web_sources(request)
+                used_web = bool(sources)
+                effective_mode = "web" if request.mode == "web" else ("ai-web" if request.enableWebSearch else "ai")
+                messages = self._build_assistant_messages(request, sources)
+                knowledge_base_ids = []
+
+            yield self._sse(
+                "retrieval",
+                {
+                    "sources": sources,
+                    "effectiveMode": effective_mode,
+                    "usedWeb": used_web,
+                    "coverageScore": coverage_score,
+                },
+            )
+
+            async for delta in self._stream_messages(messages, request.options):
+                answer_parts.append(delta)
+                yield self._sse("delta", {"content": delta})
+
+            answer = "".join(answer_parts).strip()
+            post = self._post_process(answer, sources)
+            usage = self._usage_placeholder(request.query, post.answer, sources)
+            self._save_assistant_chat(
+                principal,
+                conversation_id,
+                knowledge_base_ids,
+                request,
+                post.answer,
+                sources,
+                usage,
+                used_web,
+                coverage_score,
+                effective_mode,
+            )
+            yield self._sse(
+                "done",
+                {
+                    "conversationId": conversation_id,
+                    "usage": usage,
+                    "effectiveMode": effective_mode,
+                    "usedWeb": used_web,
+                    "coverageScore": coverage_score,
+                    "citationCoverage": post.citation_coverage,
+                    "hallucinationWarnings": post.hallucination_warnings,
+                },
+            )
+        except ApiError as exc:
+            yield self._sse("error", {"message": exc.message, "code": exc.code})
+        except Exception:
+            yield self._sse("error", {"message": "AI 助手生成失败，请稍后重试", "code": 500})
+
     # ─── Chat Preparation ─────────────────────────────────────────────────
 
     async def _prepare_chat(
@@ -207,6 +309,55 @@ class RagChainService:
             coverage_score=coverage_score,
         )
 
+    async def _prepare_assistant_rag(
+        self,
+        request: AssistantRequest,
+        principal: Principal,
+    ) -> ChatPreparation:
+        if not request.knowledgeBaseIds:
+            raise ApiError(400, "RAG 模式需要选择课程空间")
+
+        knowledge_base_ids = self._normalize_kb_ids(request.knowledgeBaseIds, principal)
+        knowledge_bases = [
+            self.repository.require_knowledge_base(kb_id, principal)
+            for kb_id in knowledge_base_ids
+        ]
+        options = self._rag_options_with_defaults(request.options)
+        retrieve_request = RetrieveRequest(
+            query=request.query,
+            knowledgeBaseIds=knowledge_base_ids,
+            topK=options.topK,
+            enableRerank=options.enableRerank,
+            rerankTopN=options.rerankTopN,
+            scoreThreshold=options.scoreThreshold,
+        )
+        conversation_id = self.repository.create_or_touch_conversation(
+            principal,
+            request.conversationId,
+            knowledge_base_ids,
+            request.query,
+        )
+        sources = self.retrieve(retrieve_request, principal)
+        coverage_score = self._coverage_score(sources)
+        effective_mode = "open" if request.enableWebSearch else "strict"
+        allow_web_search = any(bool(item.get("allowWebSearch")) for item in knowledge_bases)
+        used_web = False
+
+        if self.settings.web_fallback_enabled and request.enableWebSearch and allow_web_search:
+            web_sources = await self.web_fallback.search(request.query, self.settings.web_max_results)
+            if web_sources:
+                sources = [*sources, *web_sources]
+                used_web = True
+
+        return ChatPreparation(
+            conversation_id=conversation_id,
+            knowledge_base_ids=knowledge_base_ids,
+            sources=sources,
+            effective_mode=effective_mode,
+            used_web=used_web,
+            coverage_score=coverage_score,
+        )
+
     # ─── Query Rewriting (Phase 2: 多查询检索) ───────────────────────────
 
     async def _rewrite_query(self, query: str) -> list[str]:
@@ -244,9 +395,17 @@ class RagChainService:
         sources: list[dict[str, Any]],
         options: RagOptions,
     ) -> AsyncIterator[str]:
+        messages = self._build_messages(query, sources)
+        async for delta in self._stream_messages(messages, options):
+            yield delta
+
+    async def _stream_messages(
+        self,
+        messages: list[Any],
+        options: RagOptions,
+    ) -> AsyncIterator[str]:
         if not self.settings.dashscope_api_key:
             raise ApiError(503, "DASHSCOPE_API_KEY 未配置，无法调用生成模型")
-        messages = self._build_messages(query, sources)
         llm = self._chat_model(options)
         async for chunk in llm.astream(messages):
             content = getattr(chunk, "content", "") or ""
@@ -316,6 +475,35 @@ class RagChainService:
 
         user = f"资料：\n{context or '（未检索到相关资料）'}\n\n问题：{query}"
         return [SystemMessage(content=system), HumanMessage(content=user)]
+
+    def _build_assistant_messages(
+        self,
+        request: AssistantRequest,
+        sources: list[dict[str, Any]],
+    ) -> list[Any]:
+        messages: list[Any] = []
+        if sources:
+            context = "\n\n".join(
+                f"[{index + 1}] {item.get('fileName') or item.get('documentId', '联网资料')}\n"
+                f"URL: {self._source_url(item) or '无'}\n"
+                f"{item.get('content') or item.get('chunkContent') or ''}"
+                for index, item in enumerate(sources)
+            )
+            system = (
+                WEB_ASSISTANT_SYSTEM_PROMPT
+                + f"\n\n## 时间感知\n{self._current_date_context()}"
+                + "\n\n## 联网资料\n"
+                + context
+            )
+        else:
+            system = ASSISTANT_SYSTEM_PROMPT + f"\n\n## 时间感知\n{self._current_date_context()}"
+            if request.mode == "web" or request.enableWebSearch:
+                system += "\n\n## 联网状态\n本次未检索到可用联网资料，请明确说明联网结果为空，再谨慎回答。"
+
+        messages.append(SystemMessage(content=system))
+        messages.extend(self._history_to_messages(request.history))
+        messages.append(HumanMessage(content=request.query))
+        return messages
 
     def _current_date_context(self) -> str:
         today = datetime.now(CHINA_STANDARD_TIME).date()
@@ -431,6 +619,35 @@ class RagChainService:
         options = self._rag_options_with_defaults(request.options)
         return request.model_copy(update={"options": options}) if options is not request.options else request
 
+    def _assistant_request_with_defaults(self, request: AssistantRequest) -> AssistantRequest:
+        options = self._rag_options_with_defaults(request.options)
+        return request.model_copy(update={"options": options}) if options is not request.options else request
+
+    async def _assistant_web_sources(self, request: AssistantRequest) -> list[dict[str, Any]]:
+        should_search = request.mode == "web" or request.enableWebSearch
+        if not should_search or not self.settings.web_fallback_enabled:
+            return []
+        return await self.web_fallback.search(request.query, self.settings.web_max_results)
+
+    def _history_to_messages(self, history: list[AssistantHistoryMessage]) -> list[Any]:
+        if not history:
+            return []
+        normalized: list[Any] = []
+        for item in history[-MAX_ASSISTANT_HISTORY:]:
+            content = str(item.content or "").strip()
+            if not content:
+                continue
+            role = str(item.role or "").strip().lower()
+            if role in {"assistant", "ai"}:
+                normalized.append(AIMessage(content=content[:8000]))
+            elif role == "user":
+                normalized.append(HumanMessage(content=content[:8000]))
+        return normalized
+
+    def _source_url(self, source: dict[str, Any]) -> str:
+        metadata = source.get("metadata") or {}
+        return str(source.get("url") or metadata.get("url") or "")
+
     def _coverage_score(self, sources: list[dict[str, Any]]) -> float:
         if not sources:
             return 0
@@ -462,6 +679,34 @@ class RagChainService:
             used_web=prepared.used_web,
             coverage_score=prepared.coverage_score,
             mode=prepared.effective_mode,
+        )
+
+    def _save_assistant_chat(
+        self,
+        principal: Principal,
+        conversation_id: str,
+        knowledge_base_ids: list[str],
+        request: AssistantRequest,
+        answer: str,
+        sources: list[dict[str, Any]],
+        usage: dict[str, Any],
+        used_web: bool,
+        coverage_score: float,
+        effective_mode: str,
+    ) -> None:
+        self.repository.add_conversation_message(conversation_id, "user", request.query)
+        self.repository.add_conversation_message(conversation_id, "assistant", answer, sources, usage)
+        self.repository.save_qa_log(
+            principal,
+            conversation_id,
+            knowledge_base_ids,
+            request.query,
+            answer,
+            sources,
+            used_web=used_web,
+            coverage_score=coverage_score,
+            mode="open" if used_web else "strict",
+            intent_type=f"assistant:{effective_mode}",
         )
 
     def _usage_placeholder(

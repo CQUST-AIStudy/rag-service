@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.auth import Principal, current_principal
 from app.core.responses import api_success
-from app.schemas.rag import ChatRequest, LegacyChatRequest, RetrieveRequest
+from app.schemas.rag import AssistantRequest, ChatRequest, LegacyChatRequest, RetrieveRequest
 from app.services.dependencies import get_rag_chain_service, get_repository
 from app.services.rag_chain import RagChainService
 from app.services.repository import RagRepository
@@ -39,6 +39,19 @@ async def chat_stream(
 ) -> StreamingResponse:
     return StreamingResponse(
         rag_chain.stream_chat(request, principal),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/assistant/stream")
+async def assistant_stream(
+    request: AssistantRequest,
+    principal: Annotated[Principal, Depends(current_principal)],
+    rag_chain: Annotated[RagChainService, Depends(get_rag_chain_service)],
+) -> StreamingResponse:
+    return StreamingResponse(
+        rag_chain.stream_assistant(request, principal),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

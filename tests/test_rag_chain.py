@@ -1,6 +1,6 @@
 from app.core.auth import Principal
 from app.core.config import Settings
-from app.schemas.rag import ChatRequest, RagOptions, RetrieveRequest
+from app.schemas.rag import AssistantRequest, ChatRequest, RagOptions, RetrieveRequest
 from app.services.database import Database
 from app.services.rag_chain import RagChainService
 from app.services.repository import RagRepository
@@ -146,6 +146,113 @@ async def test_open_mode_uses_web_fallback_when_coverage_is_low(tmp_path):
     assert prepared.coverage_score == 0.1
     assert web_fallback.calls == [{"query": "What is missing?", "max_results": 2}]
     assert [item["source"] for item in prepared.sources if item.get("source") == "web"] == ["web"]
+
+
+async def test_assistant_web_mode_uses_web_fallback_without_knowledge_base(tmp_path):
+    settings, repository = make_repository(tmp_path)
+    web_fallback = FakeWebFallback()
+    service = RagChainService(
+        settings,
+        repository,
+        FakeVectorStore("chunk", 0.9),
+        FakeReranker(),
+        web_fallback,
+    )
+
+    request = AssistantRequest(query="Go 最新版本是什么？", mode="web")
+    sources = await service._assistant_web_sources(request)
+    messages = service._build_assistant_messages(request, sources)
+
+    assert web_fallback.calls == [{"query": "Go 最新版本是什么？", "max_results": 2}]
+    assert sources[0]["source"] == "web"
+    assert "联网资料" in str(messages[0].content)
+    assert "Go 最新版本是什么？" in str(messages[-1].content)
+
+
+async def test_assistant_rag_can_force_web_supplement_when_enabled(tmp_path):
+    settings, repository = make_repository(tmp_path)
+    principal = Principal(user_id="1", username="student", role="STUDENT")
+    kb = repository.create_knowledge_base(
+        principal,
+        {
+            "name": "Algorithms",
+            "embeddingModel": "text-embedding-v4",
+            "chunkSize": 512,
+            "chunkOverlap": 64,
+            "defaultMode": "strict",
+            "allowWebSearch": True,
+        },
+        embedding_dimensions=1024,
+    )
+    doc = repository.create_document(
+        principal,
+        kb["id"],
+        "guide.md",
+        str(tmp_path / "guide.md"),
+        "text/markdown",
+        {},
+    )
+    chunk = repository.replace_chunks(
+        kb["id"],
+        doc["documentId"],
+        [{"content": "Local context", "metadata": {}}],
+    )[0]
+    web_fallback = FakeWebFallback()
+    service = RagChainService(
+        settings,
+        repository,
+        FakeVectorStore(chunk["id"], 0.9),
+        FakeReranker(),
+        web_fallback,
+    )
+    request = AssistantRequest(
+        query="What is new?",
+        mode="rag",
+        enableWebSearch=True,
+        knowledgeBaseIds=[kb["id"]],
+        options=RagOptions(enableRerank=False),
+    )
+
+    prepared = await service._prepare_assistant_rag(request, principal)
+
+    assert prepared.effective_mode == "open"
+    assert prepared.used_web is True
+    assert web_fallback.calls == [{"query": "What is new?", "max_results": 2}]
+    assert any(item.get("source") == "web" for item in prepared.sources)
+
+
+async def test_stream_assistant_emits_retrieval_delta_done_events(tmp_path, monkeypatch):
+    settings, repository = make_repository(tmp_path)
+    principal = Principal(user_id="1", username="student", role="STUDENT")
+    service = RagChainService(
+        settings,
+        repository,
+        FakeVectorStore("chunk", 0.9),
+        FakeReranker(),
+        FakeWebFallback(results=[]),
+    )
+
+    async def fake_stream_messages(messages, options):
+        yield "第一段"
+        yield "第二段"
+
+    monkeypatch.setattr(service, "_stream_messages", fake_stream_messages)
+
+    events = [
+        event
+        async for event in service.stream_assistant(
+            AssistantRequest(query="解释顺序表", mode="ai"),
+            principal,
+        )
+    ]
+
+    assert events[0].startswith("event: retrieval")
+    assert events[1].startswith("event: delta")
+    assert "第一段" in events[1]
+    assert events[2].startswith("event: delta")
+    assert "第二段" in events[2]
+    assert events[3].startswith("event: done")
+    assert "conversationId" in events[3]
 
 
 async def test_open_mode_uses_web_fallback_even_when_coverage_is_high(tmp_path):
