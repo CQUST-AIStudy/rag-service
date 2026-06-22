@@ -1,0 +1,31 @@
+services:
+  rag-service:
+    image: cqust-rag-service:latest
+    container_name: cqust-rag-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.docker
+    environment:
+      RAG_HOST: 0.0.0.0
+      RAG_PORT: "8001"
+      RAG_DATA_DIR: /app/data
+    ports:
+      - "${RAG_HOST_PORT:-8001}:8001"
+    volumes:
+      - rag_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os, urllib.request; port = os.environ.get('RAG_PORT', '8001'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3).read()\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  rag_data:

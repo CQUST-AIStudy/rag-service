@@ -49,6 +49,74 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 - Swagger：`http://127.0.0.1:8001/docs`
 - 课程空间列表：`GET http://127.0.0.1:8001/rag/knowledge-base/list`
 
+## Docker 一键部署
+
+### 1. 准备 Docker 环境变量
+
+```powershell
+Copy-Item .env.docker.example .env.docker
+```
+
+至少修改以下配置：
+
+```env
+DASHSCOPE_API_KEY=你的 DashScope Key
+RAG_JWT_SECRET=与 Java 后端 JWT_SECRET 保持一致
+RAG_JWT_ISSUER=tap
+```
+
+Docker 部署默认使用生产模式：`RAG_ENV=production`。生产模式下必须配置 `RAG_JWT_SECRET`，否则鉴权接口会拒绝请求。
+
+### 2. 构建并启动
+
+```powershell
+docker compose up -d --build
+```
+
+查看日志：
+
+```powershell
+docker compose logs -f rag-service
+```
+
+启动后检查：
+
+- 健康检查：`http://127.0.0.1:8001/health`
+- Swagger：`http://127.0.0.1:8001/docs`
+
+停止服务：
+
+```powershell
+docker compose down
+```
+
+如需同时删除运行时数据卷：
+
+```powershell
+docker compose down -v
+```
+
+### 3. 数据持久化
+
+Docker Compose 会创建 `rag_data` 数据卷并挂载到容器内 `/app/data`。SQLite、Chroma 和上传文件都会写入该目录，容器重建不会丢失数据。
+
+容器内固定监听 `8001`。如果要更换宿主机对外端口，可在执行 compose 前设置 `RAG_HOST_PORT`，例如：
+
+```powershell
+$env:RAG_HOST_PORT = "18001"
+docker compose up -d --build
+```
+
+此时访问地址为 `http://127.0.0.1:18001/health`。
+
+### 4. 外部服务联动
+
+当前 Compose 只部署 RAG 服务。与外部 Java 后端和前端联动时，需要确认：
+
+- `RAG_JWT_SECRET` / `RAG_JWT_ISSUER` 与 Java 后端运行时配置一致。
+- `RAG_ALLOWED_ORIGINS` 包含前端实际访问源。
+- 前端代理 `/rag` 指向 Docker 暴露的 RAG 地址，例如 `http://127.0.0.1:8001`。
+
 ## 前端联调
 
 前端默认通过同源 `/rag` 访问 RAG 服务。开发环境需要确保 `frontend-repo/vue.config.js` 中的代理指向：
@@ -98,6 +166,8 @@ rag-service/
 ├── tests/              # pytest 测试
 ├── docs/               # 设计文档
 ├── data/               # 运行时数据：SQLite / Chroma / uploads
+├── Dockerfile          # Docker 镜像构建文件
+├── docker-compose.yml  # Docker Compose 单服务部署
 ├── pyproject.toml      # 依赖和工具配置
 ├── uv.lock             # uv 锁文件
 └── .env                # 本地环境变量，不应提交真实密钥
