@@ -38,7 +38,7 @@ MAX_ASSISTANT_HISTORY = 10
 
 ASSISTANT_SYSTEM_PROMPT = """
 ## 角色定位
-你是重庆科技大学数据结构与算法学习助手，面向学生提供学习问答、概念解释、复杂度分析和代码思路辅导。
+你是学习助手，面向学生提供学习问答、概念解释、复杂度分析和代码思路辅导。
 
 ## 回答要求
 - 默认使用中文回答，除非用户明确要求其他语言。
@@ -49,7 +49,7 @@ ASSISTANT_SYSTEM_PROMPT = """
 
 WEB_ASSISTANT_SYSTEM_PROMPT = """
 ## 角色定位
-你是重庆科技大学数据结构与算法学习助手，可以结合联网检索结果回答学生问题。
+你是学习助手，可以结合联网检索结果回答学生问题。
 
 ## 回答要求
 - 默认使用中文回答，除非用户明确要求其他语言。
@@ -436,7 +436,7 @@ class RagChainService:
         if not sources or coverage < 0.15:
             system = (
                 "## 角色定位\n"
-                "你是重庆科技大学数据结构课程的 RAG 学习助手。\n\n"
+                "你是RAG 学习助手。\n\n"
                 f"## 时间感知\n{current_date_context}\n\n"
                 "## 指令\n"
                 "当前未检索到足够相关的资料。请明确告知用户：\n"
@@ -447,7 +447,7 @@ class RagChainService:
         else:
             system = (
                 "## 角色定位\n"
-                "你是重庆科技大学数据结构课程的 RAG 学习助手。\n\n"
+                "你是RAG 学习助手。\n\n"
                 f"## 时间感知\n{current_date_context}\n\n"
                 "## 核心原则\n"
                 "1. 严禁编造：所有回答必须基于给定资料，资料不足时明确说明「依据不足，无法回答」\n"
